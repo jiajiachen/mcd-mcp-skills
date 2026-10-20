@@ -16,6 +16,16 @@ description: 麦当劳定时自动化管家。当用户想定时自动领麦当�
 - "做一个麦当劳每日活动推送"
 - "每天自动抽一次奖"
 
+## 字段口径（与 mcd-points-manager 一致）
+
+脚本解析接口数据时遵循以下约定，改动代码时不要破坏：
+
+- **信封结构**：所有工具返回 `{ success, code, message, datetime, traceId, data }`，`success === true && code === 200` 才从 `data` 取值。脚本用 `if (!r?.success)` 统一判失败。
+- **积分字段是 `string` 且可能带一位小数**（如 `"84.1"`、`"204.3"`）。脚本内一律经 `num()` 转数值、`fmt()` 输出，**禁止直接做字符串比较**（`"100" <= "84.1"` 会得到 `true`）。
+- **`expiredPoint` 必须播报**：这是用户历史已流失的积分，只报可用余额会漏掉最重要的信息。
+- **抽奖资格唯一依据** `drawDecision.resourceEligible` + `nextConsumption`。**不读 `availableTimes`**——纯积分规则（`drawTypeText === "消耗积分抽奖"`）下该字段整个不返回，缺失/0/null 都不代表不能抽。
+- **奖励信息边界**：`prizes` 只有 `name`/`imageUrl`/`typeText`，**不含中奖概率和剩余库存**，日报不得暗示或估算。
+
 ## 快速开始
 
 ```bash
@@ -40,9 +50,17 @@ node scripts/auto-routine.mjs --draw
 |---|---|---|---|
 | 1 | `auto-bind-coupons` | 写（领券） | `--dry-run` 时跳过 |
 | 2 | `campaign-calendar` | 读 | 汇总今天起 10 天的活动 |
-| 3 | `query-my-account` | 读 | 可用积分 + 临期提醒 |
-| 4 | `query-lottery-info` | 读 | 抽奖资格与下次消耗 |
-| 5 | `draw-lottery` | 写（抽奖） | 仅 `--draw` 且非 dry-run 时执行 |
+| 3 | `query-my-account` | 读 | 可用/累计/已用/历史已过期 + 临期提醒 |
+| 4 | `query-lottery-info` | 读 | 活动状态、抽奖资格与本次消耗 |
+| 5 | `draw-lottery` | 写（抽奖） | 仅 `--draw` 且非 dry-run **且通过资格护栏**时执行 |
+
+**抽奖护栏（第 5 步的门槛）**：执行 `draw-lottery` 前，脚本会先用第 4 步的结果校验，任一不满足则跳过并在日报中写明原因、本次不消耗任何积分：
+
+1. `status.code === "SUCCESS"`
+2. `activityStatusText === "进行中"`
+3. `drawDecision` 存在且 `resourceEligible === true`
+
+> 护栏的意义：定时任务无人值守，若活动异常或资源不足还硬抽，会白白失败并可能触发风控。宁可跳过，也不在状态不明时消耗积分。
 
 - Token 只从环境变量 `MCD_MCP_TOKEN` 读取，脚本内无任何硬编码密钥
 - 401 → 明确提示重新申请 Token，退出码 2；429 → 自动等待 5 秒重试一次；网络错误 → 单步骤降级为失败条目
@@ -137,6 +155,8 @@ jobs:
 ## 关键约束与护栏
 
 - **写操作明示**：`auto-bind-coupons`（领券）与 `draw-lottery`（消耗积分）均为写操作。首次部署务必先 `--dry-run` 验证，再上定时；`--draw` 默认关闭。
+- **抽奖必须过资格护栏**：即使加了 `--draw`，状态异常或 `resourceEligible !== true` 时脚本也会跳过并说明原因。不得为此放宽判断去读 `availableTimes`。
+- **数值先转换**：积分字段是带小数的字符串，任何比较/运算前必须经 `num()` 转换。
 - **限流**：MCP 限流 600 次/分钟/Token，脚本每次运行仅 4~5 次调用，远低于上限；429 时自动退避重试一次。
 - **密钥卫生**：Token 与推送密钥只允许出现在环境变量或本地 env 文件中，绝不写入脚本、配置示例或 git 仓库。
 
@@ -149,3 +169,17 @@ jobs:
 | 429 限流 | 5 秒后自动重试一次 | 仍失败则下次定时周期自然恢复 |
 | 网络不通 | 该步骤记为失败条目，继续后续步骤 | 检查网络 |
 | 推送失败 | stderr 记录，不影响日报生成 | 检查 webhook 地址/密钥 |
+
+### 抽奖 `status.code` 分派
+
+`query-lottery-info` 返回的 `status.code` 决定日报如何呈现抽奖小节：
+
+| `status.code` | 日报呈现 | 是否可抽 |
+|---|---|---|
+| `SUCCESS` | 正常展示活动、资格、本次消耗 | 视 `resourceEligible` |
+| `NOT_LOGIN` | 提示登录态失效，引导重新授权 | 否 |
+| `NO_ACTIVITY` | 提示当前无可参与活动 | 否 |
+| `ACTIVITY_ERROR` | 转述 `status.message`，建议稍后重试 | 否 |
+| `ACTIVITY_EXPIRED` | 提示活动已结束，附活动起止时间 | 否 |
+
+未知状态码原样转述 `status.message`，不自行归类。`draw-lottery` 失败时原样转述 `message` 并**不自动重试**。

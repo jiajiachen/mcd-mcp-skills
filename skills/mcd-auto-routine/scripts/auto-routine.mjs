@@ -224,41 +224,117 @@ function summarizeCalendar(r) {
   return lines.length ? lines.join('\n') + '\n' : '> 近期暂无活动安排。\n';
 }
 
+/** 积分字段是 string 且可能带一位小数（如 "84.1"），必须先转数值再比较/运算 */
+function num(v) {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** 去掉浮点误差尾巴：84.100000001 -> "84.1" */
+function fmt(n) {
+  return String(Math.round(n * 100) / 100);
+}
+
 function summarizeAccount(r) {
   if (!r?.success) return `> 积分账户查询失败：${r?.message || '未知错误'}\n`;
   const d = r.data || {};
+  const avail = num(d.availablePoint);
+  const expired = num(d.expiredPoint);
+  const cur = num(d.currentMouthExpirePoint ?? d.currentMonthExpirePoint);
+  const next = num(d.nextMouthExpirePoint ?? d.nextMonthExpirePoint);
   const lines = [
-    `- 可用积分：**${d.availablePoint ?? '-'}**`,
-    `- 累计获得：${d.accumulativePoint ?? '-'}`,
+    `- 可用积分：**${fmt(avail)}**`,
+    `- 累计获得：${fmt(num(d.accumulativePoint))} ｜ 已使用：${fmt(num(d.usedPoint))}`,
   ];
-  const cur = parseFloat(d.currentMouthExpirePoint ?? d.currentMonthExpirePoint ?? '0');
-  const next = parseFloat(d.nextMouthExpirePoint ?? d.nextMonthExpirePoint ?? '0');
-  if (cur > 0) lines.push(`- ⚠️ 本月即将过期：**${cur}** 积分，请尽快使用！`);
-  if (next > 0) lines.push(`- 下月将过期：${next} 积分`);
-  if (!(cur > 0) && !(next > 0)) lines.push('- 近期无临期积分 ✅');
+  // expiredPoint 是用户的真实损失，必须单独播报
+  if (expired > 0) lines.push(`- 历史已过期：**${fmt(expired)}** 积分（已流失）`);
+  if (cur > 0) lines.push(`- ⚠️ 本月即将过期：**${fmt(cur)}** 积分，请尽快使用！`);
+  if (next > 0) lines.push(`- 下月将过期：${fmt(next)} 积分`);
+  if (cur <= 0 && next <= 0) lines.push('- 近期无临期积分 ✅');
   return lines.join('\n') + '\n';
 }
+
+/**
+ * 抽奖业务状态码分派（与 mcd-points-manager 同一口径）。
+ * 值为 null 表示正常，可继续展示活动详情。
+ */
+const LOTTERY_STATUS_HINT = {
+  SUCCESS: null,
+  NOT_LOGIN: '登录态失效，请到 https://open.mcd.cn/mcp 重新授权',
+  NO_ACTIVITY: '当前没有可参与的积分抽奖活动',
+  ACTIVITY_ERROR: '抽奖活动异常',
+  ACTIVITY_EXPIRED: '抽奖活动已结束',
+};
 
 function summarizeLottery(r) {
   if (!r?.success) return `> 抽奖活动查询失败：${r?.message || '未知错误'}\n`;
   const d = r.data || {};
-  if (d.activityStatusText && d.activityStatusText !== '进行中') {
-    return `> 当前无进行中的抽奖活动（${d.activityStatusText}）。\n`;
+
+  // 先按 status.code 分派，再退回 activityStatusText
+  const code = d.status?.code;
+  if (code && code !== 'SUCCESS') {
+    const hint = LOTTERY_STATUS_HINT[code] || `未知状态 ${code}`;
+    const msg = d.status?.message ? `（${d.status.message}）` : '';
+    let text = `> ${hint}${msg}`;
+    if (code === 'ACTIVITY_EXPIRED' && d.beginTime) {
+      text += `\n- 活动周期：${d.beginTime} ~ ${d.endTime || '?'}`;
+    }
+    return text + '\n';
   }
+
+  if (d.activityStatusText && d.activityStatusText !== '进行中') {
+    const period = d.beginTime ? `，活动周期 ${d.beginTime} ~ ${d.endTime || '?'}` : '';
+    return `> 当前无进行中的抽奖活动（${d.activityStatusText}${period}）。\n`;
+  }
+
   const lines = [
     `- 活动：${d.activityName || '-'}（${d.beginTime || '?'} ~ ${d.endTime || '?'}）`,
     `- 规则：${d.drawTypeText || '-'}，单次消耗 ${d.drawPoint ?? '-'} 积分`,
     `- 当前可用积分：${d.availablePoint ?? '-'}`,
   ];
-  if (d.drawDecision) {
-    lines.push(`- 抽奖资格：${d.drawDecision.resourceEligible ? '✅ 可参与' : '❌ 暂不可参与'}`);
-    if (d.drawDecision.nextConsumption?.text) {
-      lines.push(`- 下次消耗：${d.drawDecision.nextConsumption.text}`);
+
+  // 资格判断唯一依据：resourceEligible + nextConsumption。
+  // 不使用 availableTimes —— 纯积分规则下该字段整个不返回，缺失/0/null 都不代表不能抽。
+  const dd = d.drawDecision;
+  if (dd) {
+    if (dd.resourceEligible === true) {
+      lines.push('- 抽奖资格：✅ 可参与');
+    } else {
+      const why = dd.reason ? `：${dd.reason}` : '';
+      lines.push(`- 抽奖资格：❌ 暂不可参与${why}`);
     }
+    if (dd.nextConsumption?.text) lines.push(`- 本次消耗：${dd.nextConsumption.text}`);
+    if (dd.fallbackConsumption) {
+      const fb = dd.fallbackConsumption.text || JSON.stringify(dd.fallbackConsumption);
+      lines.push(`- 后续兜底消耗：${fb}`);
+    }
+  } else {
+    lines.push('- 抽奖资格：接口未返回 drawDecision，无法判断');
   }
+
   const prizes = (d.prizes || []).map((p) => p.name).filter(Boolean);
-  if (prizes.length) lines.push(`- 奖池：${prizes.join('、')}`);
+  if (prizes.length) lines.push(`- 奖池（共 ${prizes.length} 项，接口不含中奖概率与库存）：${prizes.join('、')}`);
   return lines.join('\n') + '\n';
+}
+
+/**
+ * 判断本次是否允许执行 draw-lottery。
+ * 返回 null 表示放行，否则返回阻止原因。
+ * 写操作护栏：状态不明确、资源不满足时一律不抽。
+ */
+function drawBlockReason(r) {
+  if (!r?.success) return '抽奖信息查询失败，无法确认本次消耗';
+  const d = r.data || {};
+  const code = d.status?.code;
+  if (code && code !== 'SUCCESS') return `活动状态为 ${code}`;
+  if (d.activityStatusText && d.activityStatusText !== '进行中') {
+    return `活动状态为「${d.activityStatusText}」`;
+  }
+  if (!d.drawDecision) return '接口未返回 drawDecision，无法确认本次消耗';
+  if (d.drawDecision.resourceEligible !== true) {
+    return `资源不满足（${d.drawDecision.reason || '未说明原因'}）`;
+  }
+  return null;
 }
 
 function summarizeDraw(r) {
@@ -359,9 +435,12 @@ async function main() {
     ['query-my-account', '💰 积分账户', summarizeAccount],
     ['query-lottery-info', '🎰 积分抽奖', summarizeLottery],
   ];
+  let lotteryResult = null;
   for (const [tool, title, summarize] of readonlySteps) {
     try {
-      sections.push([title, summarize(await client.callTool(tool))]);
+      const res = await client.callTool(tool);
+      if (tool === 'query-lottery-info') lotteryResult = res;
+      sections.push([title, summarize(res)]);
     } catch (e) {
       failures.push(`${tool}: ${e.message}`);
       sections.push([title, `> 调用失败：${e.message}\n`]);
@@ -371,11 +450,17 @@ async function main() {
 
   // 5. 可选：执行抽奖（写操作）
   if (flags.draw && !flags.dryRun) {
-    try {
-      sections.push(['🎉 抽奖结果', summarizeDraw(await client.callTool('draw-lottery'))]);
-    } catch (e) {
-      failures.push(`draw-lottery: ${e.message}`);
-      sections.push(['🎉 抽奖结果', `> 调用失败：${e.message}\n`]);
+    // 护栏：状态不明确或资源不满足时一律不抽，避免白白消耗积分
+    const block = drawBlockReason(lotteryResult);
+    if (block) {
+      sections.push(['🎉 抽奖结果', `> 已跳过 draw-lottery：${block}。本次未消耗任何积分。\n`]);
+    } else {
+      try {
+        sections.push(['🎉 抽奖结果', summarizeDraw(await client.callTool('draw-lottery'))]);
+      } catch (e) {
+        failures.push(`draw-lottery: ${e.message}`);
+        sections.push(['🎉 抽奖结果', `> 调用失败：${e.message}\n`]);
+      }
     }
   } else if (flags.draw && flags.dryRun) {
     sections.push(['🎉 抽奖结果', '> `--dry-run` 模式下跳过 draw-lottery。\n']);
