@@ -1,0 +1,13 @@
+# 本地配置与密钥
+.env
+.env.*
+mcp-config.json
+config.json
+!config.example.json
+!mcp-config.example.json
+
+# 依赖与构建
+node_modules/
+
+# macOS
+.DS_Store

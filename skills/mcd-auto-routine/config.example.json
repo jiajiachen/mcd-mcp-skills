@@ -1,0 +1,20 @@
+{
+  "push": {
+    "wecom": {
+      "enabled": false,
+      "envKey": "WECOM_WEBHOOK_URL",
+      "comment": "企业微信机器人 Webhook 地址，从环境变量 WECOM_WEBHOOK_URL 读取，格式如 https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"
+    },
+    "bark": {
+      "enabled": false,
+      "envKey": "BARK_URL",
+      "comment": "Bark 推送地址，从环境变量 BARK_URL 读取，格式如 https://api.day.app/your-device-key"
+    },
+    "serverchan": {
+      "enabled": false,
+      "envKey": "SCTP_SENDKEY",
+      "comment": "Server酱 SendKey，从环境变量 SCTP_SENDKEY 读取，格式如 SCTxxxxxxxx"
+    }
+  },
+  "comment": "将本文件复制为 config.json 并开启需要的渠道。所有密钥只通过环境变量提供，切勿写入本文件。不开启任何渠道时，日报仅打印到 stdout。配置文件路径可通过 --config 参数或 MCD_ROUTINE_CONFIG 环境变量指定。"
+}
