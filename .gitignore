@@ -11,3 +11,6 @@ node_modules/
 
 # macOS
 .DS_Store
+
+# WorkBuddy 工作空间元数据
+.workbuddy/
